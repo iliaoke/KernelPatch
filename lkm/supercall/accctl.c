@@ -16,6 +16,7 @@
 #include <linux/pid.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
+#include <linux/seccomp.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <scdefs.h>
@@ -105,6 +106,16 @@ static void su_cred(struct cred *new, uid_t uid)
 	new->sgid = new->gid;
 }
 
+/*
+ * Disable seccomp on the current caller after a successful credential commit.
+ * Keep this behavior limited to kp_commit_su(); kp_task_su() is unchanged.
+ */
+static inline void kp_disable_current_seccomp(void)
+{
+	current_thread_info()->flags &= ~_TIF_SECCOMP;
+	current->seccomp.mode = SECCOMP_MODE_DISABLED;
+}
+
 /* no_sanitize("cfi") keeps indirect calls in this function from tripping
  * __cfi_check on traditional-CFI 5.15 kernels. */
 __attribute__((no_sanitize("cfi")))
@@ -139,9 +150,6 @@ int kp_commit_su(uid_t to_uid, const char *sctx)
 {
 	int rc;
 
-	/* Disable seccomp on the caller, matching KP's commit_common_su. */
-	current_thread_info()->flags &= ~_TIF_SECCOMP;
-
 	/* Empty sctx: default to the magisk domain (KP initializes all_allow_sctx
 	 * to ALL_ALLOW_SCONTEXT_MAGISK). The u:r:kernel:s0 domain cannot connect
 	 * sockets or run ART (seen: libsu RootServer ClassNotFoundException after
@@ -152,6 +160,7 @@ int kp_commit_su(uid_t to_uid, const char *sctx)
 		if (kp_selinux_blob_sizes) {
 			rc = commit_common_su(to_uid, ALL_ALLOW_SCONTEXT_MAGISK);
 			if (!rc) {
+				kp_disable_current_seccomp();
 				logki("commit_su: to_uid=%u magisk domain\n", to_uid);
 				return 0;
 			}
@@ -161,6 +170,7 @@ int kp_commit_su(uid_t to_uid, const char *sctx)
 		if (!new)
 			return -ENOMEM;
 		commit_creds(new);
+		kp_disable_current_seccomp();
 		logki("commit_su: to_uid=%u kernel cred (u:r:kernel:s0)\n", to_uid);
 		return 0;
 	}
@@ -174,8 +184,11 @@ int kp_commit_su(uid_t to_uid, const char *sctx)
 		if (!new)
 			return -ENOMEM;
 		commit_creds(new);
+		kp_disable_current_seccomp();
 		return 0;
 	}
+
+	kp_disable_current_seccomp();
 	return 0;
 }
 
